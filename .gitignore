@@ -1,0 +1,37 @@
+# Xcode user-specific state
+xcuserdata/
+*.xcuserstate
+
+# Build products
+DerivedData/
+build/
+*.ipa
+*.dSYM
+*.dSYM.zip
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# macOS
+.DS_Store
+
+# Local environment and secrets
+.env
+.env.*
+*.mobileprovision
+*** Add File: /Users/guosiqi/Documents/Xcode/Library Shrinker/README.md
+# Library Shrinker
+
+An iOS app for reviewing and compressing videos in the Photos library using H.264 or HEVC.
+
+The app supports ratio- and bitrate-based targets, compressed-copy tracking, storage checks, album preservation, and safe original deletion.
+
+## Requirements
+
+- Xcode 26.6 or later
+- iOS 26.5 or later
+
+## Testing
+
+Run the `Library Shrinker` scheme tests in Xcode or with `xcodebuild test` using an iOS Simulator destination.
