@@ -1,20 +1,12 @@
-//
-//  ContentView.swift
-//  Library Shrinker
-//
-//  Created by Guo Siqi on 7/8/26.
-//
-
 import SwiftUI
 
-struct VideoShrinkerView: View {
+struct ImageShrinkerView: View {
     @Binding var mode: ShrinkerMode
-    @State private var viewModel = VideoLibraryViewModel()
-    @State private var pendingOriginalDeletion: VideoAssetItem?
-    @State private var pendingCompressedDeletion: VideoAssetItem?
+    @State private var viewModel = ImageLibraryViewModel()
+    @State private var previewItem: ImageAssetItem?
+    @State private var pendingOriginalDeletion: ImageAssetItem?
+    @State private var pendingCompressedDeletion: ImageAssetItem?
     @State private var isConfirmingSelectedDeletion = false
-    @State private var lowBitRateWarning: String?
-    @State private var previewVideo: VideoAssetItem?
 
     var body: some View {
         NavigationStack {
@@ -22,53 +14,51 @@ struct VideoShrinkerView: View {
                 header
                 listHeader
 
-                List(viewModel.filteredVideoEntries) { entry in
-                    let video = entry.video
-                    VideoAssetRow(
-                        video: video,
-                        isSelected: viewModel.selectedVideoIDs.contains(video.id),
-                        compressionRecord: viewModel.compressionRecords[video.id],
-                        compressionRole: viewModel.compressionRole(for: video),
-                        targetByteSize: viewModel.targetByteSize(for: video),
-                        showsIndividualRatio: viewModel.targetMode == .bitRate,
+                List(viewModel.imageEntries) { entry in
+                    let item = entry.image
+                    ImageAssetRow(
+                        item: item,
+                        isSelected: viewModel.selectedImageIDs.contains(item.id),
+                        targetByteSize: min(
+                            item.byteSize,
+                            viewModel.targetByteSize(for: item)
+                        ),
+                        compressionRecord: viewModel.compressionRecords[item.id],
+                        compressionRole: viewModel.compressionRole(for: item),
                         isCompressedChild: entry.isCompressedChild,
                         selectionAction: {
-                            viewModel.toggleSelection(for: video)
+                            viewModel.toggleSelection(for: item)
                         },
                         previewAction: {
-                            previewVideo = video
+                            previewItem = item
                         }
                     )
                     .swipeActions(edge: .trailing) {
-                        if viewModel.canDeleteOriginal(video) {
+                        if viewModel.canDeleteOriginal(item) {
                             Button("Delete Original", systemImage: "trash", role: .destructive) {
-                                pendingOriginalDeletion = video
+                                pendingOriginalDeletion = item
                             }
-                        } else if viewModel.canDeleteCompressedCopy(video) {
+                        } else if viewModel.canDeleteCompressedCopy(item) {
                             Button("Delete Compressed", systemImage: "trash", role: .destructive) {
-                                pendingCompressedDeletion = video
+                                pendingCompressedDeletion = item
                             }
                         }
                     }
                 }
                 .listStyle(.plain)
                 .overlay {
-                    if viewModel.filteredVideos.isEmpty {
+                    if viewModel.images.isEmpty {
                         emptyState
                     }
                 }
 
-                CompressionControlsView(
+                ImageCompressionControlsView(
                     viewModel: viewModel,
                     deleteSelectedAction: {
                         isConfirmingSelectedDeletion = true
                     },
                     compressAction: {
-                        if let warning = viewModel.lowBitRateWarning {
-                            lowBitRateWarning = warning
-                        } else {
-                            viewModel.startCompression()
-                        }
+                        viewModel.startCompression()
                     }
                 )
             }
@@ -80,40 +70,43 @@ struct VideoShrinkerView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         Task {
-                            await viewModel.loadVideos()
+                            await viewModel.loadImages()
                         }
                     } label: {
                         Image(systemName: "arrow.clockwise")
                             .font(.caption2)
                     }
                     .buttonStyle(.plain)
-                    .help("Refresh photo library")
+                    .help("Refresh screenshots")
                     .disabled(viewModel.isLoading)
                 }
             }
             .task {
                 await viewModel.start()
             }
+            .sheet(item: $previewItem) { item in
+                ImagePreviewView(item: item)
+            }
             .confirmationDialog(
-                "Delete the original video?",
+                "Delete the original screenshot?",
                 isPresented: Binding(
                     get: { pendingOriginalDeletion != nil },
                     set: { if !$0 { pendingOriginalDeletion = nil } }
                 ),
                 titleVisibility: .visible,
                 presenting: pendingOriginalDeletion
-            ) { video in
+            ) { item in
                 Button("Delete Original", role: .destructive) {
                     pendingOriginalDeletion = nil
                     Task {
-                        await viewModel.deleteOriginal(video)
+                        await viewModel.deleteOriginal(item)
                     }
                 }
                 Button("Cancel", role: .cancel) {
                     pendingOriginalDeletion = nil
                 }
-            } message: { video in
-                Text("\(video.displayName) will move to Recently Deleted. Its compressed copy will remain in Photos.")
+            } message: { item in
+                Text("\(item.displayName) will move to Recently Deleted. Its compressed copy will remain in Photos.")
             }
             .confirmationDialog(
                 "Delete this compressed copy?",
@@ -123,18 +116,18 @@ struct VideoShrinkerView: View {
                 ),
                 titleVisibility: .visible,
                 presenting: pendingCompressedDeletion
-            ) { video in
+            ) { item in
                 Button("Delete Compressed Copy", role: .destructive) {
                     pendingCompressedDeletion = nil
                     Task {
-                        await viewModel.deleteCompressedCopy(video)
+                        await viewModel.deleteCompressedCopy(item)
                     }
                 }
                 Button("Cancel", role: .cancel) {
                     pendingCompressedDeletion = nil
                 }
-            } message: { video in
-                Text("\(video.displayName) will move to Recently Deleted. Its original video will remain in Photos.")
+            } message: { item in
+                Text("\(item.displayName) will move to Recently Deleted. Its original screenshot will remain in Photos.")
             }
             .confirmationDialog(
                 "Delete \(viewModel.deletableSelectedOriginals.count) selected originals?",
@@ -148,28 +141,7 @@ struct VideoShrinkerView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Only originals with verified compressed copies will move to Recently Deleted. Other selected videos will not be changed.")
-            }
-            .confirmationDialog(
-                "Very low bitrate",
-                isPresented: Binding(
-                    get: { lowBitRateWarning != nil },
-                    set: { if !$0 { lowBitRateWarning = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button("Compress Anyway") {
-                    lowBitRateWarning = nil
-                    viewModel.startCompression()
-                }
-                Button("Cancel", role: .cancel) {
-                    lowBitRateWarning = nil
-                }
-            } message: {
-                Text(lowBitRateWarning ?? "")
-            }
-            .sheet(item: $previewVideo) { video in
-                VideoPreviewView(video: video)
+                Text("Only originals with verified compressed copies will move to Recently Deleted. Other selected screenshots will not be changed.")
             }
         }
     }
@@ -183,31 +155,18 @@ struct VideoShrinkerView: View {
 
                 Spacer()
 
-                Text("\(viewModel.videos.count) videos")
+                Text("\(viewModel.images.count) screenshots")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
 
-            Picker("Videos", selection: $viewModel.selectedFilter) {
-                ForEach(VideoListFilter.allCases) { filter in
+            Picker("Images", selection: $viewModel.selectedFilter) {
+                ForEach(ImageListFilter.allCases) { filter in
                     Text(filter.title).tag(filter)
                 }
             }
             .pickerStyle(.segmented)
-
-            HStack {
-                Text("Bitrate")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Picker("Bitrate", selection: $viewModel.selectedBitRateFilter) {
-                    ForEach(VideoBitRateFilter.allCases) { filter in
-                        Text(filter.title).tag(filter)
-                    }
-                }
-                .pickerStyle(.menu)
-            }
 
             if viewModel.isLoading {
                 ProgressView(value: viewModel.loadingProgress)
@@ -232,14 +191,10 @@ struct VideoShrinkerView: View {
 
     private var listHeader: some View {
         HStack(spacing: 8) {
-            Text("Video")
-                .frame(width: 78, alignment: .leading)
-
-            Text("Info")
+            Text("Screenshot")
                 .frame(maxWidth: .infinity, alignment: .leading)
-
-            Text("MB")
-                .frame(width: 34, alignment: .trailing)
+            Text("Size")
+                .frame(width: 58, alignment: .trailing)
         }
         .font(.caption2.weight(.semibold))
         .foregroundStyle(.secondary)
@@ -250,18 +205,14 @@ struct VideoShrinkerView: View {
 
     private var emptyState: some View {
         ContentUnavailableView(
-            "No Videos",
-            systemImage: "video.slash",
-            description: Text(
-                viewModel.videos.isEmpty
-                    ? viewModel.emptyStateMessage
-                    : "No videos match the selected filter."
-            )
+            "No Screenshots",
+            systemImage: "photo.badge.magnifyingglass",
+            description: Text(viewModel.emptyStateMessage)
         )
         .padding()
     }
 }
 
 #Preview {
-    VideoShrinkerView(mode: .constant(.video))
+    ImageShrinkerView(mode: .constant(.image))
 }

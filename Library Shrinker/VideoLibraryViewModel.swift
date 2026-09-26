@@ -32,6 +32,7 @@ final class VideoLibraryViewModel {
 
     private let videoStore = PhotoLibraryVideoStore()
     private let compressor = VideoCompressor()
+    private let metadataCacheStore = VideoMetadataCacheStore()
     private let defaults = UserDefaults.standard
     private let compressionRecordsKey = "compressionRecords"
     private let locallyDeletedAssetIDsKey = "locallyDeletedAssetIDs"
@@ -83,7 +84,7 @@ final class VideoLibraryViewModel {
         videos.filter { selectedVideoIDs.contains($0.id) }
     }
 
-    var filteredVideos: [VideoAssetItem] {
+    var filteredVideoEntries: [VideoListEntry] {
         let roleFiltered: [VideoAssetItem] = switch selectedFilter {
         case .all:
             videos
@@ -92,9 +93,43 @@ final class VideoLibraryViewModel {
         case .compressed:
             videos.filter { compressionRole(for: $0) == .compressedCopy }
         }
-        return roleFiltered
+        let bitrateFiltered = roleFiltered
             .filter { selectedBitRateFilter.contains(bitsPerSecond: $0.bitRate) }
-            .sorted { $0.byteSize > $1.byteSize }
+
+        guard selectedFilter == .all else {
+            return bitrateFiltered
+                .sorted { $0.byteSize > $1.byteSize }
+                .map { VideoListEntry(video: $0, isCompressedChild: false) }
+        }
+
+        let visibleIDs = Set(bitrateFiltered.map(\.id))
+        let compressedByOriginalID = Dictionary(grouping: bitrateFiltered.filter {
+            compressionRole(for: $0) == .compressedCopy
+        }) { item in
+            compressionRecords[item.id]?.originalAssetID ?? ""
+        }
+        let roots = bitrateFiltered.filter { item in
+            guard compressionRole(for: item) == .compressedCopy,
+                  let originalID = compressionRecords[item.id]?.originalAssetID else {
+                return true
+            }
+            return !visibleIDs.contains(originalID)
+        }.sorted { $0.byteSize > $1.byteSize }
+
+        return roots.flatMap { root in
+            var entries = [VideoListEntry(video: root, isCompressedChild: false)]
+            guard compressionRole(for: root) != .compressedCopy else { return entries }
+            let children = (compressedByOriginalID[root.id] ?? [])
+                .sorted { $0.byteSize > $1.byteSize }
+            entries.append(contentsOf: children.map {
+                VideoListEntry(video: $0, isCompressedChild: true)
+            })
+            return entries
+        }
+    }
+
+    var filteredVideos: [VideoAssetItem] {
+        filteredVideoEntries.map(\.video)
     }
 
     func compressionRole(for item: VideoAssetItem) -> VideoCompressionRole {
@@ -119,6 +154,10 @@ final class VideoLibraryViewModel {
         compressionRole(for: item) == .originalWithCompressedCopy
     }
 
+    func canDeleteCompressedCopy(_ item: VideoAssetItem) -> Bool {
+        compressionRole(for: item) == .compressedCopy
+    }
+
     var deletableSelectedOriginals: [VideoAssetItem] {
         selectedItems.filter(canDeleteOriginal)
     }
@@ -141,6 +180,33 @@ final class VideoLibraryViewModel {
             compressionText = "The compressed copy remains in Photos. You can recover the original from Recently Deleted."
         } catch {
             statusText = "Could not delete original"
+            compressionText = error.localizedDescription
+        }
+    }
+
+    func deleteCompressedCopy(_ item: VideoAssetItem) async {
+        guard canDeleteCompressedCopy(item) else {
+            compressionText = "This video is not a recognized compressed copy."
+            return
+        }
+
+        do {
+            let record = compressionRecords[item.id]
+            try await videoStore.deleteAsset(item.asset)
+            locallyDeletedAssetIDs.insert(item.id)
+            persistLocallyDeletedAssetIDs()
+            videos.removeAll { $0.id == item.id }
+            selectedVideoIDs.remove(item.id)
+            compressionRecords.removeValue(forKey: item.id)
+
+            if let originalID = record?.originalAssetID {
+                refreshOriginalCompressionRecord(for: originalID)
+            }
+            persistCompressionRecords()
+            statusText = "Compressed copy moved to Recently Deleted"
+            compressionText = "The original video remains in Photos."
+        } catch {
+            statusText = "Could not delete compressed copy"
             compressionText = error.localizedDescription
         }
     }
@@ -306,17 +372,34 @@ final class VideoLibraryViewModel {
             persistLocallyDeletedAssetIDs()
         }
         let assets = fetchedAssets.filter { !locallyDeletedAssetIDs.contains($0.localIdentifier) }
-        let fetchedIDs = Set(assets.map(\.localIdentifier))
         let existingByID = Dictionary(uniqueKeysWithValues: videos.map { ($0.id, $0) })
-        var loadedVideos = videos.filter { fetchedIDs.contains($0.id) }
-        let newAssets = assets.filter { existingByID[$0.localIdentifier] == nil }
+        let cacheSnapshot = metadataCacheStore.load()
+        let requiresFullScan = cacheSnapshot?.requiresFullScan() ?? true
+        var loadedVideos: [VideoAssetItem] = []
+        var assetsToScan: [PHAsset] = []
+        var cacheHitCount = 0
+
+        for asset in assets {
+            if let existingItem = existingByID[asset.localIdentifier],
+               !requiresFullScan,
+               CachedVideoMetadata(item: existingItem).matches(asset) {
+                loadedVideos.append(existingItem)
+            } else if !requiresFullScan,
+                      let cached = cacheSnapshot?.records[asset.localIdentifier],
+                      cached.matches(asset) {
+                loadedVideos.append(cached.makeItem(asset: asset))
+                cacheHitCount += 1
+            } else {
+                assetsToScan.append(asset)
+            }
+        }
 
         videos = loadedVideos.sorted { $0.byteSize > $1.byteSize }
-        statusText = newAssets.isEmpty
-            ? "Library is up to date"
-            : "Reading \(newAssets.count) new video(s)"
+        statusText = assetsToScan.isEmpty
+            ? "Loaded \(cacheHitCount) cached video(s)"
+            : "Reading \(assetsToScan.count) changed video(s)"
 
-        for (index, asset) in newAssets.enumerated() {
+        for (index, asset) in assetsToScan.enumerated() {
             do {
                 let item = try await videoStore.makeVideoItem(from: asset)
                 loadedVideos.append(item)
@@ -325,9 +408,17 @@ final class VideoLibraryViewModel {
                 scanFailureCount += 1
             }
 
-            loadingProgress = newAssets.isEmpty ? 1 : Double(index + 1) / Double(newAssets.count)
-            statusText = "Reading new video \(index + 1) of \(newAssets.count)"
+            loadingProgress = assetsToScan.isEmpty ? 1 : Double(index + 1) / Double(assetsToScan.count)
+            statusText = "Reading changed video \(index + 1) of \(assetsToScan.count)"
         }
+
+        let records = Dictionary(uniqueKeysWithValues: videos.map {
+            ($0.id, CachedVideoMetadata(item: $0))
+        })
+        metadataCacheStore.save(VideoMetadataCacheSnapshot(
+            lastFullScanAt: requiresFullScan ? Date() : (cacheSnapshot?.lastFullScanAt ?? Date()),
+            records: records
+        ))
 
         selectedVideoIDs = selectedVideoIDs.intersection(Set(videos.map(\.id)))
         isLoading = false
@@ -336,10 +427,12 @@ final class VideoLibraryViewModel {
             statusText = "No readable videos found"
         } else if scanFailureCount > 0 {
             statusText = "Updated, \(scanFailureCount) new video(s) skipped"
-        } else if newAssets.isEmpty {
-            statusText = "Library is up to date"
+        } else if assetsToScan.isEmpty {
+            statusText = "Loaded from cache"
         } else {
-            statusText = "Added \(newAssets.count) new video(s)"
+            statusText = requiresFullScan
+                ? "Weekly metadata scan complete"
+                : "Updated \(assetsToScan.count) changed video(s)"
         }
     }
 
@@ -357,6 +450,18 @@ final class VideoLibraryViewModel {
         }
 
         compressionTask?.cancel()
+        let itemCount = selectedItems.count
+        do {
+            try ContinuousCompressionCoordinator.shared.submit(
+                kind: .video,
+                itemCount: itemCount,
+                expirationAction: { [weak self] in
+                    self?.compressionTask?.cancel()
+                }
+            )
+        } catch {
+            compressionText = "Background continuation is unavailable: \(error.localizedDescription). Compression will continue while the app remains active."
+        }
         compressionTask = Task {
             await compressSelectedVideos()
         }
@@ -364,6 +469,7 @@ final class VideoLibraryViewModel {
 
     func cancelCompression() {
         compressionTask?.cancel()
+        ContinuousCompressionCoordinator.shared.cancel(kind: .video)
         compressionTask = nil
         isCompressing = false
         isLoading = false
@@ -375,6 +481,7 @@ final class VideoLibraryViewModel {
     private func compressSelectedVideos() async {
         let items = selectedItems
         guard !items.isEmpty else {
+            ContinuousCompressionCoordinator.shared.complete(kind: .video, success: false)
             return
         }
 
@@ -385,6 +492,7 @@ final class VideoLibraryViewModel {
 
         guard hasEnoughSpace(for: items) else {
             finishCompressionPreparationFailure()
+            ContinuousCompressionCoordinator.shared.complete(kind: .video, success: false)
             return
         }
 
@@ -491,6 +599,10 @@ final class VideoLibraryViewModel {
                 failureMessages: failureMessages
             )
         }
+        ContinuousCompressionCoordinator.shared.complete(
+            kind: .video,
+            success: !Task.isCancelled
+        )
     }
 
     private func hasEnoughSpace(for items: [VideoAssetItem]) -> Bool {
@@ -558,6 +670,11 @@ final class VideoLibraryViewModel {
 
         let clampedProgress = min(max(currentItemProgress, 0), 1)
         loadingProgress = (Double(completedItems) + clampedProgress) / Double(totalItems)
+        ContinuousCompressionCoordinator.shared.report(
+            kind: .video,
+            fractionCompleted: loadingProgress,
+            subtitle: "Compressing \(completedItems + 1) of \(totalItems)"
+        )
     }
 
     private func updateStatusForAuthorization() {
@@ -583,5 +700,21 @@ final class VideoLibraryViewModel {
 
     private func persistLocallyDeletedAssetIDs() {
         defaults.set(Array(locallyDeletedAssetIDs), forKey: locallyDeletedAssetIDsKey)
+    }
+
+    private func refreshOriginalCompressionRecord(for originalID: String) {
+        let remainingRecord = compressionRecords.values
+            .filter { record in
+                record.originalAssetID == originalID
+                    && record.compressedAssetID != nil
+                    && videos.contains { $0.id == record.compressedAssetID }
+            }
+            .max { $0.compressedAt < $1.compressedAt }
+
+        if let remainingRecord {
+            compressionRecords[originalID] = remainingRecord
+        } else {
+            compressionRecords.removeValue(forKey: originalID)
+        }
     }
 }

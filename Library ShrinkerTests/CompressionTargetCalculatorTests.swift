@@ -81,4 +81,34 @@ final class CompressionTargetCalculatorTests: XCTestCase {
         XCTAssertTrue(VideoBitRateFilter.twoPoint5To5.contains(bitsPerSecond: 2_500_000))
         XCTAssertTrue(VideoBitRateFilter.twentyAndAbove.contains(bitsPerSecond: 20_000_000))
     }
+
+    func testMetadataCacheRequiresFullScanAfterSevenDays() {
+        let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        let recent = VideoMetadataCacheSnapshot(
+            lastFullScanAt: now.addingTimeInterval(-6 * 24 * 60 * 60),
+            records: [:]
+        )
+        let expired = VideoMetadataCacheSnapshot(
+            lastFullScanAt: now.addingTimeInterval(-7 * 24 * 60 * 60),
+            records: [:]
+        )
+
+        XCTAssertFalse(recent.requiresFullScan(at: now))
+        XCTAssertTrue(expired.requiresFullScan(at: now))
+    }
+
+    func testImageMetadataCacheRequiresFullScanAfterSevenDays() {
+        let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        let recent = ImageMetadataCacheSnapshot(
+            lastFullScanAt: now.addingTimeInterval(-6 * 24 * 60 * 60),
+            records: [:]
+        )
+        let expired = ImageMetadataCacheSnapshot(
+            lastFullScanAt: now.addingTimeInterval(-7 * 24 * 60 * 60),
+            records: [:]
+        )
+
+        XCTAssertFalse(recent.requiresFullScan(at: now))
+        XCTAssertTrue(expired.requiresFullScan(at: now))
+    }
 }

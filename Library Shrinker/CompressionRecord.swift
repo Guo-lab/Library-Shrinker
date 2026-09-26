@@ -26,6 +26,26 @@ enum VideoCompressionRole {
     case compressedCopy
 }
 
+struct VideoListEntry: Identifiable {
+    let video: VideoAssetItem
+    let isCompressedChild: Bool
+
+    var id: String { video.id }
+}
+
+enum ImageCompressionRole {
+    case original
+    case originalWithCompressedCopy
+    case compressedCopy
+}
+
+struct ImageListEntry: Identifiable {
+    let image: ImageAssetItem
+    let isCompressedChild: Bool
+
+    var id: String { image.id }
+}
+
 enum VideoListFilter: String, CaseIterable, Identifiable {
     case all
     case originals
