@@ -117,7 +117,7 @@ final class VideoCompressor {
         }
 
         exportSession.shouldOptimizeForNetworkUse = true
-        exportSession.canPerformMultiplePassesOverSourceMediaData = true
+        exportSession.canPerformMultiplePassesOverSourceMediaData = false
         exportSession.fileLengthLimit = targetByteSize
         exportSession.metadata = try? await asset.load(.metadata)
 

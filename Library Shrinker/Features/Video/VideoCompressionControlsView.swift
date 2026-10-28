@@ -98,51 +98,17 @@ struct CompressionControlsView: View {
             }
             .frame(height: 32)
 
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("\(viewModel.selectedVideoIDs.count) selected")
-                        .font(.caption.weight(.semibold))
-                    Text(viewModel.selectionSizeText)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                if !viewModel.deletableSelectedOriginals.isEmpty && !viewModel.isCompressing {
-                    Button(role: .destructive, action: deleteSelectedAction) {
-                        Label("Delete \(viewModel.deletableSelectedOriginals.count)", systemImage: "trash")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .buttonStyle(.bordered)
-                }
-
-                if viewModel.isCompressing {
-                    Button(role: .cancel) {
-                        viewModel.cancelCompression()
-                    } label: {
-                        Label("Cancel", systemImage: "xmark")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .buttonStyle(.bordered)
-                } else {
-                    Button {
-                        compressAction()
-                    } label: {
-                        Label("Compress", systemImage: "arrow.down.right.and.arrow.up.left")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!viewModel.canCompress)
-                }
-            }
-
-            if let compressionText = viewModel.compressionText {
-                Text(compressionText)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            SelectionActionBar(
+                selectedCount: viewModel.selectedVideoIDs.count,
+                selectionSizeText: viewModel.selectionSizeText,
+                deletableCount: viewModel.deletableSelectedOriginals.count,
+                isWorking: viewModel.isCompressing,
+                canStart: viewModel.canCompress,
+                statusText: viewModel.compressionText,
+                deleteAction: deleteSelectedAction,
+                cancelAction: viewModel.cancelCompression,
+                startAction: compressAction
+            )
         }
         .padding()
         .background(.regularMaterial)

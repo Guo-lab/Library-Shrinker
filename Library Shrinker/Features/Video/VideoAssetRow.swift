@@ -8,13 +8,11 @@ import SwiftUI
 
 struct VideoAssetRow: View {
     let video: VideoAssetItem
-    let isSelected: Bool
     let compressionRecord: CompressionRecord?
     let compressionRole: VideoCompressionRole
     let targetByteSize: Int64
     let showsIndividualRatio: Bool
     let isCompressedChild: Bool
-    let selectionAction: () -> Void
     let previewAction: () -> Void
 
     var body: some View {
@@ -25,14 +23,6 @@ struct VideoAssetRow: View {
                         .foregroundStyle(.tertiary)
                         .frame(width: 10)
                 }
-
-                Button(action: selectionAction) {
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .font(.callout)
-                        .foregroundStyle(isSelected ? .blue : .secondary)
-                        .frame(width: 20, height: 24)
-                }
-                .buttonStyle(.plain)
 
                 Button(action: previewAction) {
                     VideoThumbnailView(asset: video.asset)
@@ -74,16 +64,12 @@ struct VideoAssetRow: View {
                         .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture(perform: selectionAction)
 
                 Text(video.fileSizeMegabytesText)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                     .frame(width: 34, alignment: .trailing)
-                    .contentShape(Rectangle())
-                    .onTapGesture(perform: selectionAction)
         }
         .listRowInsets(EdgeInsets(
             top: 8,

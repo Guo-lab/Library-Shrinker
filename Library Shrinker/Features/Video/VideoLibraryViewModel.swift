@@ -30,25 +30,42 @@ final class VideoLibraryViewModel {
     var compressionText: String?
     var scanFailureCount = 0
 
-    private let videoStore = PhotoLibraryVideoStore()
-    private let compressor = VideoCompressor()
-    private let metadataCacheStore = VideoMetadataCacheStore()
-    private let defaults = UserDefaults.standard
-    private let compressionRecordsKey = "compressionRecords"
-    private let locallyDeletedAssetIDsKey = "locallyDeletedAssetIDs"
+    private let videoStore: PhotoLibraryVideoStore
+    private let compressionWorkflow: VideoCompressionWorkflow
+    private let scanner: VideoLibraryScanner
+    private let stateRepository: any LibraryStateRepository
     private var compressionTask: Task<Void, Never>?
     private var locallyDeletedAssetIDs: Set<String>
 
-    init() {
-        if let data = defaults.data(forKey: compressionRecordsKey),
-           let records = try? JSONDecoder().decode([String: CompressionRecord].self, from: data) {
-            compressionRecords = records
-        } else {
-            compressionRecords = [:]
-        }
-        locallyDeletedAssetIDs = Set(
-            UserDefaults.standard.stringArray(forKey: "locallyDeletedAssetIDs") ?? []
+    init(
+        videoStore: PhotoLibraryVideoStore? = nil,
+        compressor: VideoCompressor? = nil,
+        metadataCacheStore: VideoMetadataCacheStore? = nil,
+        stateRepository: (any LibraryStateRepository)? = nil,
+        scanner: VideoLibraryScanner? = nil
+    ) {
+        let repository = stateRepository ?? UserDefaultsLibraryStateRepository()
+        let resolvedVideoStore = videoStore ?? PhotoLibraryVideoStore()
+        let resolvedCacheStore = metadataCacheStore ?? VideoMetadataCacheStore()
+        let resolvedCompressor = compressor ?? VideoCompressor()
+        self.videoStore = resolvedVideoStore
+        self.compressionWorkflow = VideoCompressionWorkflow(
+            compressor: resolvedCompressor,
+            repository: repository
         )
+        self.scanner = scanner ?? VideoLibraryScanner(
+            videoStore: resolvedVideoStore,
+            cacheStore: resolvedCacheStore
+        )
+        self.stateRepository = repository
+        compressionRecords = repository.compressionRecords(for: .video)
+        locallyDeletedAssetIDs = repository.locallyDeletedVideoAssetIDs()
+    }
+
+    func reloadAfterBackupImport() async {
+        compressionRecords = stateRepository.compressionRecords(for: .video)
+        locallyDeletedAssetIDs = stateRepository.locallyDeletedVideoAssetIDs()
+        await loadVideos()
     }
 
     var needsAuthorization: Bool {
@@ -363,77 +380,24 @@ final class VideoLibraryViewModel {
         compressionText = nil
         scanFailureCount = 0
         statusText = "Scanning video sizes"
-
-        let fetchedAssets = await videoStore.fetchVideoAssets()
-        let rawFetchedIDs = Set(fetchedAssets.map(\.localIdentifier))
-        let confirmedAbsentDeletedIDs = locallyDeletedAssetIDs.subtracting(rawFetchedIDs)
-        if !confirmedAbsentDeletedIDs.isEmpty {
-            locallyDeletedAssetIDs.subtract(confirmedAbsentDeletedIDs)
+        let result = await scanner.scan(
+            existingItems: videos,
+            locallyDeletedAssetIDs: locallyDeletedAssetIDs
+        ) { [weak self] update in
+            self?.videos = update.items
+            self?.loadingProgress = update.progress
+            self?.statusText = update.statusText
+        }
+        videos = result.items
+        scanFailureCount = result.failureCount
+        if locallyDeletedAssetIDs != result.remainingLocallyDeletedAssetIDs {
+            locallyDeletedAssetIDs = result.remainingLocallyDeletedAssetIDs
             persistLocallyDeletedAssetIDs()
         }
-        let assets = fetchedAssets.filter { !locallyDeletedAssetIDs.contains($0.localIdentifier) }
-        let existingByID = Dictionary(uniqueKeysWithValues: videos.map { ($0.id, $0) })
-        let cacheSnapshot = metadataCacheStore.load()
-        let requiresFullScan = cacheSnapshot?.requiresFullScan() ?? true
-        var loadedVideos: [VideoAssetItem] = []
-        var assetsToScan: [PHAsset] = []
-        var cacheHitCount = 0
-
-        for asset in assets {
-            if let existingItem = existingByID[asset.localIdentifier],
-               !requiresFullScan,
-               CachedVideoMetadata(item: existingItem).matches(asset) {
-                loadedVideos.append(existingItem)
-            } else if !requiresFullScan,
-                      let cached = cacheSnapshot?.records[asset.localIdentifier],
-                      cached.matches(asset) {
-                loadedVideos.append(cached.makeItem(asset: asset))
-                cacheHitCount += 1
-            } else {
-                assetsToScan.append(asset)
-            }
-        }
-
-        videos = loadedVideos.sorted { $0.byteSize > $1.byteSize }
-        statusText = assetsToScan.isEmpty
-            ? "Loaded \(cacheHitCount) cached video(s)"
-            : "Reading \(assetsToScan.count) changed video(s)"
-
-        for (index, asset) in assetsToScan.enumerated() {
-            do {
-                let item = try await videoStore.makeVideoItem(from: asset)
-                loadedVideos.append(item)
-                videos = loadedVideos.sorted { $0.byteSize > $1.byteSize }
-            } catch {
-                scanFailureCount += 1
-            }
-
-            loadingProgress = assetsToScan.isEmpty ? 1 : Double(index + 1) / Double(assetsToScan.count)
-            statusText = "Reading changed video \(index + 1) of \(assetsToScan.count)"
-        }
-
-        let records = Dictionary(uniqueKeysWithValues: videos.map {
-            ($0.id, CachedVideoMetadata(item: $0))
-        })
-        metadataCacheStore.save(VideoMetadataCacheSnapshot(
-            lastFullScanAt: requiresFullScan ? Date() : (cacheSnapshot?.lastFullScanAt ?? Date()),
-            records: records
-        ))
-
         selectedVideoIDs = selectedVideoIDs.intersection(Set(videos.map(\.id)))
         isLoading = false
         loadingProgress = 1
-        if videos.isEmpty {
-            statusText = "No readable videos found"
-        } else if scanFailureCount > 0 {
-            statusText = "Updated, \(scanFailureCount) new video(s) skipped"
-        } else if assetsToScan.isEmpty {
-            statusText = "Loaded from cache"
-        } else {
-            statusText = requiresFullScan
-                ? "Weekly metadata scan complete"
-                : "Updated \(assetsToScan.count) changed video(s)"
-        }
+        statusText = result.statusText
     }
 
     func toggleSelection(for video: VideoAssetItem) {
@@ -451,18 +415,24 @@ final class VideoLibraryViewModel {
 
         compressionTask?.cancel()
         let itemCount = selectedItems.count
-        do {
-            try ContinuousCompressionCoordinator.shared.submit(
-                kind: .video,
-                itemCount: itemCount,
-                expirationAction: { [weak self] in
-                    self?.compressionTask?.cancel()
-                }
-            )
-        } catch {
-            compressionText = "Background continuation is unavailable: \(error.localizedDescription). Compression will continue while the app remains active."
-        }
-        compressionTask = Task {
+        compressionText = "Waiting for background processing"
+        compressionTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await ContinuousCompressionCoordinator.shared.begin(
+                    kind: .video,
+                    itemCount: itemCount,
+                    expirationAction: { [weak self] in
+                        self?.compressionTask?.cancel()
+                    }
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                compressionText = "Background continuation is unavailable: \(error.localizedDescription). Compression will continue while the app remains active."
+            }
+
+            guard !Task.isCancelled else { return }
             await compressSelectedVideos()
         }
     }
@@ -479,8 +449,16 @@ final class VideoLibraryViewModel {
     }
 
     private func compressSelectedVideos() async {
-        let items = selectedItems
-        guard !items.isEmpty else {
+        let workItems = selectedItems.compactMap { item -> VideoCompressionWorkItem? in
+            let target = targetByteSize(for: item)
+            guard target > 0, target < item.byteSize else { return nil }
+            return VideoCompressionWorkItem(
+                item: item,
+                targetByteSize: target,
+                targetDescription: targetDescription(for: item)
+            )
+        }
+        guard !workItems.isEmpty else {
             ContinuousCompressionCoordinator.shared.complete(kind: .video, success: false)
             return
         }
@@ -489,191 +467,26 @@ final class VideoLibraryViewModel {
         isLoading = true
         loadingProgress = 0
         compressionText = "Checking available storage"
-
-        guard hasEnoughSpace(for: items) else {
-            finishCompressionPreparationFailure()
-            ContinuousCompressionCoordinator.shared.complete(kind: .video, success: false)
-            return
+        let outcome = await compressionWorkflow.run(
+            workItems: workItems,
+            preset: selectedPreset,
+            existingRecords: compressionRecords
+        ) { [weak self] update in
+            self?.loadingProgress = update.progress
+            self?.statusText = update.statusText
+            self?.compressionText = update.detailText
         }
-
-        var successCount = 0
-        var processedCount = 0
-        var failureMessages: [String] = []
-        var savedBytes: Int64 = 0
-        var successfulItemIDs: Set<String> = []
-        var storageStopMessage: String?
-
-        for (index, item) in items.enumerated() {
-            if Task.isCancelled {
-                break
-            }
-
-            if index > 0 {
-                let remainingItems = Array(items[index...])
-                guard hasEnoughSpace(for: remainingItems) else {
-                    storageStopMessage = compressionText
-                    break
-                }
-            }
-
-            do {
-                let completedItemsBeforeCurrent = processedCount
-                let totalItemCount = items.count
-                let viewModel = self
-                compressionText = "Compressing \(processedCount + 1) of \(items.count): \(item.displayName)"
-                let result = try await compressor.compress(
-                    item,
-                    using: selectedPreset,
-                    targetByteSize: targetByteSize(for: item),
-                    progressHandler: { itemProgress in
-                        Task { @MainActor [viewModel] in
-                            viewModel.updateCompressionProgress(
-                                completedItems: completedItemsBeforeCurrent,
-                                totalItems: totalItemCount,
-                                currentItemProgress: itemProgress
-                            )
-                        }
-                    }
-                )
-                successCount += 1
-                savedBytes += result.savedByteSize
-                successfulItemIDs.insert(item.id)
-                let record = CompressionRecord(
-                    originalAssetID: result.originalAssetID,
-                    compressedAssetID: result.compressedAssetID,
-                    originalByteSize: result.originalByteSize,
-                    compressedByteSize: result.compressedByteSize,
-                    presetName: targetDescription(for: item),
-                    compressedAt: Date()
-                )
-                compressionRecords[result.originalAssetID] = record
-                if let compressedAssetID = result.compressedAssetID {
-                    compressionRecords[compressedAssetID] = record
-                }
-                persistCompressionRecords()
-            } catch is CancellationError {
-                compressionText = "Cancelled before changing original videos."
-                break
-            } catch {
-                let message = "\(item.displayName): \(error.localizedDescription)"
-                failureMessages.append(message)
-                if error.isOutOfDiskSpaceError {
-                    storageStopMessage = "Storage became full while processing \(item.displayName)."
-                    break
-                }
-            }
-
-            processedCount += 1
-            loadingProgress = Double(processedCount) / Double(items.count)
-        }
-
-        selectedVideoIDs.subtract(successfulItemIDs)
+        compressionRecords = outcome.records
+        selectedVideoIDs.subtract(outcome.successfulItemIDs)
         isCompressing = false
         isLoading = false
         compressionTask = nil
-
-        if Task.isCancelled {
-            statusText = "Compression cancelled"
-            compressionText = completionSummary(
-                successCount: successCount,
-                totalCount: items.count,
-                savedBytes: savedBytes,
-                failureMessages: failureMessages,
-                ending: "Cancelled. Videos already saved remain in Photos."
-            )
-        } else if let storageStopMessage {
-            statusText = "Compression stopped: low storage"
-            compressionText = completionSummary(
-                successCount: successCount,
-                totalCount: items.count,
-                savedBytes: savedBytes,
-                failureMessages: failureMessages,
-                ending: "\(storageStopMessage) Videos already saved remain in Photos."
-            )
-        } else {
-            statusText = "Compression finished"
-            compressionText = completionSummary(
-                successCount: successCount,
-                totalCount: items.count,
-                savedBytes: savedBytes,
-                failureMessages: failureMessages
-            )
-        }
+        loadingProgress = outcome.preparationFailed ? 0 : loadingProgress
+        statusText = outcome.statusText
+        compressionText = outcome.detailText
         ContinuousCompressionCoordinator.shared.complete(
             kind: .video,
-            success: !Task.isCancelled
-        )
-    }
-
-    private func hasEnoughSpace(for items: [VideoAssetItem]) -> Bool {
-        let targets = items.compactMap { item -> Int64? in
-            let target = targetByteSize(for: item)
-            return target > 0 && target < item.byteSize ? target : nil
-        }
-
-        do {
-            let estimate = try DiskSpaceMonitor.estimate(for: targets)
-            guard estimate.hasEnoughSpace else {
-                let available = ByteCountFormatter.libraryShrinkerFormatter.string(
-                    fromByteCount: estimate.availableByteSize
-                )
-                let required = ByteCountFormatter.libraryShrinkerFormatter.string(
-                    fromByteCount: estimate.requiredByteSize
-                )
-                compressionText = "Not enough storage: about \(required) required, \(available) available."
-                return false
-            }
-        } catch {
-            // If iOS cannot report capacity, let the export proceed and rely on its error handling.
-        }
-
-        return true
-    }
-
-    private func finishCompressionPreparationFailure() {
-        isCompressing = false
-        isLoading = false
-        loadingProgress = 0
-        compressionTask = nil
-        statusText = "Compression not started: low storage"
-    }
-
-    private func completionSummary(
-        successCount: Int,
-        totalCount: Int,
-        savedBytes: Int64,
-        failureMessages: [String],
-        ending: String? = nil
-    ) -> String {
-        let saved = ByteCountFormatter.libraryShrinkerFormatter.string(fromByteCount: savedBytes)
-        var parts = ["Compressed \(successCount) of \(totalCount), saved \(saved)."]
-
-        if !failureMessages.isEmpty {
-            parts.append("Failed: \(failureMessages.joined(separator: "; "))")
-        }
-        if let ending {
-            parts.append(ending)
-        }
-
-        return parts.joined(separator: " ")
-    }
-
-    private func updateCompressionProgress(
-        completedItems: Int,
-        totalItems: Int,
-        currentItemProgress: Double
-    ) {
-        guard totalItems > 0 else {
-            loadingProgress = 0
-            return
-        }
-
-        let clampedProgress = min(max(currentItemProgress, 0), 1)
-        loadingProgress = (Double(completedItems) + clampedProgress) / Double(totalItems)
-        ContinuousCompressionCoordinator.shared.report(
-            kind: .video,
-            fractionCompleted: loadingProgress,
-            subtitle: "Compressing \(completedItems + 1) of \(totalItems)"
+            success: !outcome.wasCancelled && !outcome.preparationFailed
         )
     }
 
@@ -691,15 +504,11 @@ final class VideoLibraryViewModel {
     }
 
     private func persistCompressionRecords() {
-        guard let data = try? JSONEncoder().encode(compressionRecords) else {
-            return
-        }
-
-        defaults.set(data, forKey: compressionRecordsKey)
+        try? stateRepository.saveCompressionRecords(compressionRecords, for: .video)
     }
 
     private func persistLocallyDeletedAssetIDs() {
-        defaults.set(Array(locallyDeletedAssetIDs), forKey: locallyDeletedAssetIDsKey)
+        stateRepository.saveLocallyDeletedVideoAssetIDs(locallyDeletedAssetIDs)
     }
 
     private func refreshOriginalCompressionRecord(for originalID: String) {

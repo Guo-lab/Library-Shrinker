@@ -8,7 +8,11 @@
 import SwiftUI
 
 @main
-struct Library_ShrinkerApp: App {
+struct LibraryShrinkerApp: App {
+    init() {
+        ContinuousCompressionCoordinator.shared.registerLaunchHandlers()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

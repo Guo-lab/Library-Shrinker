@@ -19,20 +19,39 @@ final class ImageLibraryViewModel {
     var compressionText: String?
     var compressionRecords: [String: CompressionRecord]
 
-    private let imageStore = PhotoLibraryImageStore()
-    private let compressor = ImageCompressor()
-    private let metadataCacheStore = ImageMetadataCacheStore()
-    private let defaults = UserDefaults.standard
-    private let compressionRecordsKey = "imageCompressionRecords"
+    private let imageStore: PhotoLibraryImageStore
+    private let compressionWorkflow: ImageCompressionWorkflow
+    private let scanner: ImageLibraryScanner
+    private let stateRepository: any LibraryStateRepository
     private var compressionTask: Task<Void, Never>?
 
-    init() {
-        if let data = defaults.data(forKey: compressionRecordsKey),
-           let records = try? JSONDecoder().decode([String: CompressionRecord].self, from: data) {
-            compressionRecords = records
-        } else {
-            compressionRecords = [:]
-        }
+    init(
+        imageStore: PhotoLibraryImageStore? = nil,
+        compressor: ImageCompressor? = nil,
+        metadataCacheStore: ImageMetadataCacheStore? = nil,
+        stateRepository: (any LibraryStateRepository)? = nil,
+        scanner: ImageLibraryScanner? = nil
+    ) {
+        let repository = stateRepository ?? UserDefaultsLibraryStateRepository()
+        let resolvedImageStore = imageStore ?? PhotoLibraryImageStore()
+        let resolvedCacheStore = metadataCacheStore ?? ImageMetadataCacheStore()
+        let resolvedCompressor = compressor ?? ImageCompressor()
+        self.imageStore = resolvedImageStore
+        self.compressionWorkflow = ImageCompressionWorkflow(
+            compressor: resolvedCompressor,
+            repository: repository
+        )
+        self.scanner = scanner ?? ImageLibraryScanner(
+            imageStore: resolvedImageStore,
+            cacheStore: resolvedCacheStore
+        )
+        self.stateRepository = repository
+        compressionRecords = repository.compressionRecords(for: .image)
+    }
+
+    func reloadAfterBackupImport() async {
+        compressionRecords = stateRepository.compressionRecords(for: .image)
+        await loadImages()
     }
 
     var needsAuthorization: Bool {
@@ -256,88 +275,19 @@ final class ImageLibraryViewModel {
         isLoading = true
         loadingProgress = 0
         statusText = "Scanning screenshots"
-
-        let screenshotAssets = await imageStore.fetchScreenshotAssets()
-        let compressedIDs = Set(compressionRecords.values.compactMap(\.compressedAssetID))
-        let compressedAssets = await imageStore.fetchAssets(
-            withLocalIdentifiers: Array(compressedIDs)
-        )
-        var assetsByID = Dictionary(
-            uniqueKeysWithValues: screenshotAssets.map { ($0.localIdentifier, $0) }
-        )
-        for asset in compressedAssets {
-            assetsByID[asset.localIdentifier] = asset
+        let result = await scanner.scan(
+            existingItems: images,
+            compressionRecords: compressionRecords
+        ) { [weak self] update in
+            self?.images = update.items
+            self?.loadingProgress = update.progress
+            self?.statusText = update.statusText
         }
-        let assets = Array(assetsByID.values)
-        let existingByID = Dictionary(uniqueKeysWithValues: images.map { ($0.id, $0) })
-        let cacheSnapshot = metadataCacheStore.load()
-        let requiresFullScan = cacheSnapshot?.requiresFullScan() ?? true
-        var loadedItems: [ImageAssetItem] = []
-        var assetsToScan: [PHAsset] = []
-        var cacheHitCount = 0
-        var scanFailureCount = 0
-        loadedItems.reserveCapacity(assets.count)
-
-        for asset in assets {
-            if let existingItem = existingByID[asset.localIdentifier],
-               !requiresFullScan,
-               CachedImageMetadata(item: existingItem).matches(asset) {
-                loadedItems.append(existingItem)
-            } else if !requiresFullScan,
-                      let cached = cacheSnapshot?.records[asset.localIdentifier],
-                      cached.matches(asset) {
-                loadedItems.append(cached.makeItem(asset: asset))
-                cacheHitCount += 1
-            } else {
-                assetsToScan.append(asset)
-            }
-        }
-
-        images = loadedItems.sorted { $0.byteSize > $1.byteSize }
-        statusText = assetsToScan.isEmpty
-            ? "Loaded \(cacheHitCount) cached image(s)"
-            : "Reading \(assetsToScan.count) changed image(s)"
-
-        for (index, asset) in assetsToScan.enumerated() {
-            do {
-                let item = try await imageStore.makeImageItem(from: asset)
-                loadedItems.append(item)
-                images = loadedItems.sorted { $0.byteSize > $1.byteSize }
-            } catch {
-                scanFailureCount += 1
-            }
-
-            loadingProgress = assetsToScan.isEmpty
-                ? 1
-                : Double(index + 1) / Double(assetsToScan.count)
-            statusText = "Reading changed image \(index + 1) of \(assetsToScan.count)"
-        }
-
-        images = loadedItems.sorted { $0.byteSize > $1.byteSize }
-        let cacheRecords = Dictionary(uniqueKeysWithValues: images.map {
-            ($0.id, CachedImageMetadata(item: $0))
-        })
-        metadataCacheStore.save(ImageMetadataCacheSnapshot(
-            lastFullScanAt: requiresFullScan
-                ? Date()
-                : (cacheSnapshot?.lastFullScanAt ?? Date()),
-            records: cacheRecords
-        ))
-
+        images = result.items
         selectedImageIDs.formIntersection(Set(images.map(\.id)))
         isLoading = false
         loadingProgress = 1
-        if images.isEmpty {
-            statusText = "No readable screenshots found"
-        } else if scanFailureCount > 0 {
-            statusText = "Updated, \(scanFailureCount) image(s) skipped"
-        } else if assetsToScan.isEmpty {
-            statusText = "Loaded from cache"
-        } else {
-            statusText = requiresFullScan
-                ? "Weekly metadata scan complete"
-                : "Updated \(assetsToScan.count) changed image(s)"
-        }
+        statusText = result.statusText
     }
 
     func toggleSelection(for item: ImageAssetItem) {
@@ -352,18 +302,24 @@ final class ImageLibraryViewModel {
         guard canCompress else { return }
         compressionTask?.cancel()
         let itemCount = selectedItems.count
-        do {
-            try ContinuousCompressionCoordinator.shared.submit(
-                kind: .image,
-                itemCount: itemCount,
-                expirationAction: { [weak self] in
-                    self?.compressionTask?.cancel()
-                }
-            )
-        } catch {
-            compressionText = "Background continuation is unavailable: \(error.localizedDescription). Compression will continue while the app remains active."
-        }
-        compressionTask = Task {
+        compressionText = "Waiting for background processing"
+        compressionTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await ContinuousCompressionCoordinator.shared.begin(
+                    kind: .image,
+                    itemCount: itemCount,
+                    expirationAction: { [weak self] in
+                        self?.compressionTask?.cancel()
+                    }
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                compressionText = "Background continuation is unavailable: \(error.localizedDescription). Compression will continue while the app remains active."
+            }
+
+            guard !Task.isCancelled else { return }
             await compressSelectedImages()
         }
     }
@@ -379,10 +335,13 @@ final class ImageLibraryViewModel {
     }
 
     private func compressSelectedImages() async {
-        let items = selectedItems.filter {
-            targetByteSize(for: $0) < $0.byteSize
+        let workItems = selectedItems.compactMap { item -> ImageCompressionWorkItem? in
+            let target = targetByteSize(for: item)
+            return target < item.byteSize
+                ? ImageCompressionWorkItem(item: item, targetByteSize: target)
+                : nil
         }
-        guard !items.isEmpty else {
+        guard !workItems.isEmpty else {
             ContinuousCompressionCoordinator.shared.complete(kind: .image, success: false)
             return
         }
@@ -390,77 +349,30 @@ final class ImageLibraryViewModel {
         isCompressing = true
         isLoading = true
         loadingProgress = 0
-        var successCount = 0
-        var savedBytes: Int64 = 0
-        var failures: [String] = []
-
-        for (index, item) in items.enumerated() {
-            guard !Task.isCancelled else { break }
-            statusText = "Compressing \(index + 1) of \(items.count)"
-            compressionText = item.displayName
-
-            do {
-                let result = try await compressor.compress(
-                    item,
-                    targetByteSize: targetByteSize(for: item)
-                )
-                let record = CompressionRecord(
-                    originalAssetID: item.id,
-                    compressedAssetID: result.compressedAssetID,
-                    originalByteSize: item.byteSize,
-                    compressedByteSize: result.compressedByteSize,
-                    presetName: "JPEG",
-                    compressedAt: Date()
-                )
-                if let previousID = compressionRecords[item.id]?.compressedAssetID {
-                    compressionRecords.removeValue(forKey: previousID)
-                }
-                compressionRecords[item.id] = record
-                if let compressedID = result.compressedAssetID {
-                    compressionRecords[compressedID] = record
-                }
-                persistCompressionRecords()
-                successCount += 1
-                savedBytes += max(0, item.byteSize - result.compressedByteSize)
-                selectedImageIDs.remove(item.id)
-            } catch {
-                failures.append("\(item.displayName): \(error.localizedDescription)")
-            }
-            loadingProgress = Double(index + 1) / Double(items.count)
-            ContinuousCompressionCoordinator.shared.report(
-                kind: .image,
-                fractionCompleted: loadingProgress,
-                subtitle: "Compressing \(index + 1) of \(items.count)"
-            )
+        let outcome = await compressionWorkflow.run(
+            workItems: workItems,
+            existingRecords: compressionRecords
+        ) { [weak self] update in
+            self?.loadingProgress = update.progress
+            self?.statusText = update.statusText
+            self?.compressionText = update.detailText
         }
-
+        compressionRecords = outcome.records
+        selectedImageIDs.subtract(outcome.successfulItemIDs)
         isCompressing = false
         isLoading = false
         compressionTask = nil
-
-        if Task.isCancelled {
-            statusText = "Compression cancelled"
-        } else {
-            statusText = successCount == items.count ? "Compression complete" : "Compression finished"
-        }
-
-        let saved = ByteCountFormatter.libraryShrinkerFormatter.string(fromByteCount: savedBytes)
-        if failures.isEmpty {
-            compressionText = "Saved \(successCount) compressed copy/copies in the Image Shrinker album • about \(saved) saved."
-        } else {
-            compressionText = "Saved \(successCount) of \(items.count). \(failures.first ?? "")"
-        }
-
+        statusText = outcome.statusText
+        compressionText = outcome.detailText
         ContinuousCompressionCoordinator.shared.complete(
             kind: .image,
-            success: !Task.isCancelled
+            success: !outcome.wasCancelled
         )
         await loadImages()
     }
 
     private func persistCompressionRecords() {
-        guard let data = try? JSONEncoder().encode(compressionRecords) else { return }
-        defaults.set(data, forKey: compressionRecordsKey)
+        try? stateRepository.saveCompressionRecords(compressionRecords, for: .image)
     }
 
     private func updateStatus() {

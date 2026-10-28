@@ -2,12 +2,10 @@ import SwiftUI
 
 struct ImageAssetRow: View {
     let item: ImageAssetItem
-    let isSelected: Bool
     let targetByteSize: Int64
     let compressionRecord: CompressionRecord?
     let compressionRole: ImageCompressionRole
     let isCompressedChild: Bool
-    let selectionAction: () -> Void
     let previewAction: () -> Void
 
     var body: some View {
@@ -17,21 +15,6 @@ struct ImageAssetRow: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .frame(width: 10)
-            }
-
-            if compressionRole == .compressedCopy {
-                Image(systemName: "arrow.down.circle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.blue)
-                    .frame(width: 20, height: 24)
-            } else {
-                Button(action: selectionAction) {
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .font(.callout)
-                        .foregroundStyle(isSelected ? .blue : .secondary)
-                        .frame(width: 20, height: 24)
-                }
-                .buttonStyle(.plain)
             }
 
             Button(action: previewAction) {
@@ -61,12 +44,6 @@ struct ImageAssetRow: View {
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if compressionRole != .compressedCopy {
-                    selectionAction()
-                }
-            }
 
             Text(item.fileSizeText)
                 .font(.caption.weight(.semibold))

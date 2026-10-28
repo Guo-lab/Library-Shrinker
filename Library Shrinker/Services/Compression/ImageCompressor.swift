@@ -40,7 +40,8 @@ final class ImageCompressor {
         var upperQuality = 1.0
         var bestData: Data?
 
-        for _ in 0..<9 {
+        for _ in 0..<7 {
+            try Task.checkCancellation()
             let quality = (lowerQuality + upperQuality) / 2
             guard let candidate = image.jpegData(compressionQuality: quality) else {
                 throw ImageCompressorError.cannotEncodeImage
