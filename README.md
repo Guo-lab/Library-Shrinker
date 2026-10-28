@@ -4,6 +4,10 @@ Library Shrinker is an iOS utility for finding large videos and screenshots, cre
 
 [![Watch the Library Shrinker demo](Docs/demo-poster.png)](Docs/Library-Shrinker-Demo.mp4)
 
+## Full Simulator Demo
+
+https://github.com/user-attachments/assets/9b5e33bd-d338-4afc-b714-68767bb2af89
+
 **[Watch the full simulator demo](Docs/Library-Shrinker-Demo.mp4)**
 
 **[Watch the complete uncut recording](Docs/Library-Shrinker-Demo-Full.mp4)**
