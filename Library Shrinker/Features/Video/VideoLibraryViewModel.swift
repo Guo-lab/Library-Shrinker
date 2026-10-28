@@ -482,12 +482,16 @@ final class VideoLibraryViewModel {
         isLoading = false
         compressionTask = nil
         loadingProgress = outcome.preparationFailed ? 0 : loadingProgress
-        statusText = outcome.statusText
-        compressionText = outcome.detailText
         ContinuousCompressionCoordinator.shared.complete(
             kind: .video,
             success: !outcome.wasCancelled && !outcome.preparationFailed
         )
+
+        if !outcome.successfulItemIDs.isEmpty {
+            await loadVideos()
+        }
+        statusText = outcome.statusText
+        compressionText = outcome.detailText
     }
 
     private func updateStatusForAuthorization() {

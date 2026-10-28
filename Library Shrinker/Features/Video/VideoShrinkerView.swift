@@ -152,10 +152,9 @@ struct VideoShrinkerView: View {
             } message: { video in
                 Text("\(video.displayName) will move to Recently Deleted. Its original video will remain in Photos.")
             }
-            .confirmationDialog(
+            .alert(
                 "Delete \(viewModel.deletableSelectedOriginals.count) selected originals?",
-                isPresented: $isConfirmingSelectedDeletion,
-                titleVisibility: .visible
+                isPresented: $isConfirmingSelectedDeletion
             ) {
                 Button("Delete Selected Originals", role: .destructive) {
                     Task {

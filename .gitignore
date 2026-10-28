@@ -25,3 +25,6 @@ build/
 .env.*
 !.env.example
 *.mobileprovision
+
+# Local unedited demo captures
+Docs/*-Raw.mp4

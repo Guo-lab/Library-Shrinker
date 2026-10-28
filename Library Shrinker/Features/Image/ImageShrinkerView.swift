@@ -145,10 +145,9 @@ struct ImageShrinkerView: View {
             } message: { item in
                 Text("\(item.displayName) will move to Recently Deleted. Its original screenshot will remain in Photos.")
             }
-            .confirmationDialog(
+            .alert(
                 "Delete \(viewModel.deletableSelectedOriginals.count) selected originals?",
-                isPresented: $isConfirmingSelectedDeletion,
-                titleVisibility: .visible
+                isPresented: $isConfirmingSelectedDeletion
             ) {
                 Button("Delete Selected Originals", role: .destructive) {
                     Task {
