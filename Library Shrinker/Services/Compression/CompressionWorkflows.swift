@@ -41,11 +41,21 @@ final class ImageCompressionWorkflow {
         var successfulIDs: Set<String> = []
         var savedBytes: Int64 = 0
         var failures: [String] = []
+        var thermalStopMessage: String?
 
         for (index, workItem) in workItems.enumerated() {
             guard !Task.isCancelled else { break }
             do {
-                try await CompressionResourcePolicy.prepareForNextItem()
+                try await CompressionResourcePolicy.prepareForNextItem {
+                    onUpdate(ImageCompressionUpdate(
+                        progress: Double(index) / Double(workItems.count),
+                        statusText: "Paused while device cools down",
+                        detailText: "Compression will resume automatically when the device temperature improves."
+                    ))
+                }
+            } catch CompressionResourcePolicyError.thermalCooldownTimedOut {
+                thermalStopMessage = "The device stayed too hot for 60 seconds. Try again after it cools down."
+                break
             } catch {
                 break
             }
@@ -98,13 +108,23 @@ final class ImageCompressionWorkflow {
         }
 
         let cancelled = Task.isCancelled
-        let status = cancelled
-            ? "Compression cancelled"
-            : (successfulIDs.count == workItems.count ? "Compression complete" : "Compression finished")
+        let status: String
+        if cancelled {
+            status = "Compression cancelled"
+        } else if thermalStopMessage != nil {
+            status = "Compression stopped: device too hot"
+        } else {
+            status = successfulIDs.count == workItems.count ? "Compression complete" : "Compression finished"
+        }
         let saved = ByteCountFormatter.libraryShrinkerFormatter.string(fromByteCount: savedBytes)
-        let detail = failures.isEmpty
-            ? "Saved \(successfulIDs.count) compressed copy/copies in the Image Shrinker album • about \(saved) saved."
-            : "Saved \(successfulIDs.count) of \(workItems.count). \(failures.first ?? "")"
+        let detail: String
+        if let thermalStopMessage {
+            detail = "Saved \(successfulIDs.count) of \(workItems.count). \(thermalStopMessage)"
+        } else if failures.isEmpty {
+            detail = "Saved \(successfulIDs.count) compressed copy/copies in the Image Shrinker album • about \(saved) saved."
+        } else {
+            detail = "Saved \(successfulIDs.count) of \(workItems.count). \(failures.first ?? "")"
+        }
 
         return ImageCompressionOutcome(
             records: records,
@@ -187,11 +207,22 @@ final class VideoCompressionWorkflow {
         var failureMessages: [String] = []
         var savedBytes: Int64 = 0
         var storageStopMessage: String?
+        var thermalStopMessage: String?
 
         for (index, workItem) in workItems.enumerated() {
             guard !Task.isCancelled else { break }
+            let completedBeforeCooling = processedCount
             do {
-                try await CompressionResourcePolicy.prepareForNextItem()
+                try await CompressionResourcePolicy.prepareForNextItem {
+                    onUpdate(VideoCompressionUpdate(
+                        progress: Double(completedBeforeCooling) / Double(workItems.count),
+                        statusText: "Paused while device cools down",
+                        detailText: "Compression will resume automatically when the device temperature improves."
+                    ))
+                }
+            } catch CompressionResourcePolicyError.thermalCooldownTimedOut {
+                thermalStopMessage = "The device stayed too hot for 60 seconds."
+                break
             } catch {
                 break
             }
@@ -271,6 +302,9 @@ final class VideoCompressionWorkflow {
         } else if let storageStopMessage {
             status = "Compression stopped: low storage"
             ending = "\(storageStopMessage) Videos already saved remain in Photos."
+        } else if let thermalStopMessage {
+            status = "Compression stopped: device too hot"
+            ending = "\(thermalStopMessage) Try again after it cools down. Videos already saved remain in Photos."
         } else {
             status = "Compression finished"
             ending = nil

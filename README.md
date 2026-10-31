@@ -31,3 +31,25 @@ The footage was recorded on an iPhone simulator using synthetic test media. No p
 ## Verification
 
 The exercised simulator scenarios and expected results are documented in [Simulator Test Cases](Docs/Simulator-Test-Cases.md).
+
+## macOS status
+
+The repository now includes a native `Library Shrinker Mac` target. The first macOS milestone currently provides:
+
+- Native `NavigationSplitView` library navigation.
+- PhotoKit authorization and access to videos and screenshots stored in Mac Photos.
+- Native Command/Shift multi-selection.
+- HEVC or H.264 video compression with a target-size ratio.
+- JPEG screenshot compression with a target-size ratio.
+- Safe deletion confirmation and non-destructive compressed-copy creation.
+
+The macOS target builds and launches successfully and has read real PhotoKit video assets. Automated UI interaction tooling does not currently support macOS, so visual interaction and compression output still require manual testing on a Mac Photos library.
+
+Planned macOS parity work:
+
+- Extract the verified iOS/macOS compression, persistence, and metadata logic into a shared layer.
+- Add original-file size scanning, bitrate mode, compression profiles, and detailed progress.
+- Add preview, original/compressed relationship verification, and backup import/export.
+- Add a Mac-appropriate long-running task model and cancellation recovery.
+- Observe Photos library and external-library availability changes.
+- Optionally scan screenshot folders outside Photos.
